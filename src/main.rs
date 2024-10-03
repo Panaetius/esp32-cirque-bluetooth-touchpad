@@ -137,7 +137,7 @@ fn main() -> Result<()> {
     });
     let mut delay_index = 0;
     let delays = [1, 5, 10, 20];
-    let mut last_values: Option<F32x3> = None;
+    let mut last_values: Option<I16x3> = None;
     let mut conn_updated = 0;
     let mut prev_time = timer1.counter().unwrap();
 
@@ -181,15 +181,15 @@ fn main() -> Result<()> {
             //     accel_data.y / 12.0,
             //     accel_data.z / 12.0,
             // );
-            let accel_data = imu.gyro_norm().unwrap();
+            let accel_data = imu.gyro_raw().unwrap();
             if last_values.is_none() {
                 last_values = Some(accel_data);
             } else if let Some(vals) = last_values {
-                let offset = F32x3::new(
-                    accel_data.x - vals.x,
-                    accel_data.y - vals.y,
-                    accel_data.z - vals.z,
-                );
+                // let offset = F32x3::new(
+                //     accel_data.x - vals.x,
+                //     accel_data.y - vals.y,
+                //     accel_data.z - vals.z,
+                // );
                 // prev_time = timer1.counter().unwrap();
                 input_position
                     .lock()
@@ -198,19 +198,21 @@ fn main() -> Result<()> {
                         axis: [
                             // accel_data.x.clamp(-126.0, 126.0) as i8,
                             // -accel_data.y.clamp(-126.0, 126.0) as i8,
-                            offset.x.clamp(i8::MIN as f32, i8::MAX as f32) as i8,
-                            (-offset.y).clamp(i8::MIN as f32, i8::MAX as f32) as i8,
+                            // offset.x.clamp(i8::MIN as f32, i8::MAX as f32) as i8,
+                            // (-offset.y).clamp(i8::MIN as f32, i8::MAX as f32) as i8,
+                            (accel_data.x - vals.x)
+                                .max(i8::MAX as i16)
+                                .min(i8::MIN as i16) as i8,
+                            (vals.x - accel_data.x)
+                                .max(i8::MAX as i16)
+                                .min(i8::MIN as i16) as i8,
                             0,
                         ],
                     })
                     .notify();
                 // let new_time = timer1.counter().unwrap();
 
-                // log::info!(
-                //     "gyro data: {:?} ({:?})",
-                //     offset,
-                //     (new_time - prev_time) / 1000
-                // );
+                log::info!("gyro data: {:?}", imu.gyro_raw().unwrap());
             }
             Ets::delay_us(1);
         }
