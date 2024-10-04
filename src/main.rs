@@ -53,6 +53,23 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (END_COLLECTION)
 );
 
+const ACCEL_CURVE_SPEEDS: [f32; 4] = [7.0, 15.0, 40.0, 128.0];
+const ACCEL_CURVE_FACTORS: [f32; 4] = [1.0, 1.5, 4.0, 4.0];
+
+fn accelerate_move(x_delta: f32, y_delta: f32) -> (f32, f32) {
+    let speed = (x_delta.powi(2) + y_delta.powi(2)).sqrt();
+    for i in 0..3 {
+        if speed >= ACCEL_CURVE_SPEEDS[i] && speed < ACCEL_CURVE_SPEEDS[i + 1] {
+            let pos = (speed - ACCEL_CURVE_SPEEDS[i])
+                / (ACCEL_CURVE_SPEEDS[i + 1] - ACCEL_CURVE_SPEEDS[i]);
+            let factor = pos * (ACCEL_CURVE_FACTORS[i + 1] - ACCEL_CURVE_FACTORS[i])
+                + ACCEL_CURVE_FACTORS[i];
+            return (x_delta * factor, y_delta * factor);
+        }
+    }
+    (x_delta, y_delta)
+}
+
 #[allow(dead_code)]
 #[repr(packed)]
 struct MouseReport {
@@ -141,6 +158,7 @@ fn main() -> Result<()> {
             if let Some(touch_data) = pad_data {
                 let buttons = (touch_data.primary_pressed as u8)
                     | ((touch_data.secondary_pressed as u8) << 1);
+                let delta = accelerate_move(touch_data.x_delta as f32, touch_data.y_delta as f32);
                 input_position
                     .lock()
                     .set_from(&MouseReport {
@@ -150,13 +168,20 @@ fn main() -> Result<()> {
                             // -accel_data.y.clamp(-126.0, 126.0) as i8,
                             // offset.x.clamp(i8::MIN as f32, i8::MAX as f32) as i8,
                             // (-offset.y).clamp(i8::MIN as f32, i8::MAX as f32) as i8,
-                            touch_data.x_delta.max(i8::MIN as i16).min(i8::MAX as i16) as i8,
-                            touch_data.y_delta.max(i8::MIN as i16).min(i8::MAX as i16) as i8,
+                            delta.0.max(i8::MIN as f32).min(i8::MAX as f32) as i8,
+                            delta.1.max(i8::MIN as f32).min(i8::MAX as f32) as i8,
                             0,
                         ],
                     })
                     .notify();
-                // log::info!("pad data:{:?}", touch_data);
+                log::info!(
+                    "pad data:{:?}, scaled:{:?}",
+                    (touch_data.x_delta, touch_data.y_delta),
+                    (
+                        delta.0.max(i8::MIN as f32).min(i8::MAX as f32) as i8,
+                        delta.1.max(i8::MIN as f32).min(i8::MAX as f32) as i8
+                    )
+                );
             }
             // let new_time = timer1.counter().unwrap();
 
