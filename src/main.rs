@@ -14,10 +14,7 @@ use esp_idf_hal::{
     prelude::*,
     timer::{TimerConfig, TimerDriver},
 };
-use icm42670::{
-    accelerometer::vector::{F32x3, I16x3},
-    Address, Icm42670, PowerMode,
-};
+use tm040040::{Address, FeedMode, Tm040040, XYInverted};
 
 const TRACKPAD_ID: u8 = 0x01;
 
@@ -25,9 +22,9 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (USAGE_PAGE, 0x01), // Generic Desktop
     (USAGE, 0x02),      // Mouse
     (COLLECTION, 0x01), // Application
-    (REPORT_ID, TRACKPAD_ID),
     (USAGE, 0x01),      //Pointer
     (COLLECTION, 0x00), //Physical
+    (REPORT_ID, TRACKPAD_ID),
     //---------------------------- Mouse buttons --------------
     (USAGE_PAGE, 0x09),    //Button
     (USAGE_MINIMUM, 0x01), //Button1
@@ -56,20 +53,11 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (END_COLLECTION)
 );
 
+#[allow(dead_code)]
 #[repr(packed)]
 struct MouseReport {
     buttons: u8, // bits for buttons are packed into a single u8, lowest bit = left, second lowest bit = right click
     axis: [i8; 3],
-}
-
-fn to_i8(v: i16) -> i8 {
-    if v > i8::MAX as i16 {
-        i8::MAX
-    } else if v < i8::MIN as i16 {
-        i8::MIN
-    } else {
-        v as i8
-    }
 }
 
 fn main() -> Result<()> {
@@ -91,14 +79,16 @@ fn main() -> Result<()> {
     let scl = peripherals.pins.gpio8;
     let config = I2cConfig::new().baudrate(400.kHz().into());
     let i2c = I2cDriver::new(peripherals.i2c0, sda, scl, &config)?;
-    let mut imu = Icm42670::new(i2c, Address::Primary).unwrap();
-    let device_id = imu.device_id().unwrap();
+    let mut trackpad = Tm040040::new(i2c, Address::Primary).unwrap();
+    let device_id = trackpad.device_id().unwrap();
+    trackpad.set_feed_mode(FeedMode::Enabled).unwrap();
     log::info!("Device Id:{:?}", device_id);
+    let power_mode = trackpad.power_mode().unwrap();
+    log::info!("Powermode: {:?}", power_mode);
 
-    imu.set_power_mode(PowerMode::GyroLowNoise).unwrap();
-    imu.set_gyro_odr(icm42670::GyroOdr::Hz1600).unwrap();
-    // imu.set_gyro_lp_filter_bandwidth(GyroLpFiltBw::Hz180)
-    //     .unwrap();
+    let position_mode = trackpad.position_mode().unwrap();
+    log::info!("Positionmode: {:?}", position_mode);
+    trackpad.set_xy_inverted(XYInverted::XInverted).unwrap();
 
     BLEDevice::set_device_name("Awesome BT Trackpad").unwrap();
 
@@ -135,12 +125,8 @@ fn main() -> Result<()> {
     server.on_authentication_complete(|desc, result| {
         log::info!("Auth Complete: {:?}: {:?}", result, desc);
     });
-    let mut delay_index = 0;
-    let delays = [1, 5, 10, 20];
-    let mut last_values: Option<I16x3> = None;
-    let mut conn_updated = 0;
-    let mut prev_time = timer1.counter().unwrap();
 
+    let mut conn_updated = 0;
     loop {
         log::info!("Checking connections");
         while server.connected_count() > 0 {
@@ -151,73 +137,34 @@ fn main() -> Result<()> {
                 log::info!("connection params updated");
                 conn_updated += 1;
             }
-            // log::info!("connected!");
-            // log::info!("delay: {:?}", delays[delay_index]);
-            // for i in 0..12 {
-            //     input_position
-            //         .lock()
-            //         .set_from(&MouseReport {
-            //             buttons: 0,
-            //             axis: [i * 10, 0, 0],
-            //         })
-            //         .notify();
-            //     Ets::delay_ms(delays[delay_index]);
-            // }
-            // delay::FreeRtos::delay_ms(5000);
-            // delay_index = (delay_index + 1) % 4;
-
-            // let mut offset: F32x3 = F32x3::new(0.0, 0.0, 0.0);
-            // let mut accel_data = F32x3::new(0.0, 0.0, 0.0);
-            // for _ in 0..1 {
-            //     let data = imu.gyro_norm().unwrap();
-            //     accel_data = F32x3::new(
-            //         accel_data.x + data.x,
-            //         accel_data.y + data.y,
-            //         accel_data.z + data.z,
-            //     );
-            // }
-            // accel_data = F32x3::new(
-            //     accel_data.x / 12.0,
-            //     accel_data.y / 12.0,
-            //     accel_data.z / 12.0,
-            // );
-            let accel_data = imu.gyro_raw().unwrap();
-            if last_values.is_none() {
-                last_values = Some(accel_data);
-            } else if let Some(vals) = last_values {
-                // let offset = F32x3::new(
-                //     accel_data.x - vals.x,
-                //     accel_data.y - vals.y,
-                //     accel_data.z - vals.z,
-                // );
-                // prev_time = timer1.counter().unwrap();
+            let pad_data = trackpad.relative_data().unwrap();
+            if let Some(touch_data) = pad_data {
+                let buttons = (touch_data.primary_pressed as u8)
+                    | ((touch_data.secondary_pressed as u8) << 1);
                 input_position
                     .lock()
                     .set_from(&MouseReport {
-                        buttons: 0,
+                        buttons,
                         axis: [
                             // accel_data.x.clamp(-126.0, 126.0) as i8,
                             // -accel_data.y.clamp(-126.0, 126.0) as i8,
                             // offset.x.clamp(i8::MIN as f32, i8::MAX as f32) as i8,
                             // (-offset.y).clamp(i8::MIN as f32, i8::MAX as f32) as i8,
-                            (accel_data.x - vals.x)
-                                .max(i8::MAX as i16)
-                                .min(i8::MIN as i16) as i8,
-                            (vals.x - accel_data.x)
-                                .max(i8::MAX as i16)
-                                .min(i8::MIN as i16) as i8,
+                            touch_data.x_delta.max(i8::MIN as i16).min(i8::MAX as i16) as i8,
+                            touch_data.y_delta.max(i8::MIN as i16).min(i8::MAX as i16) as i8,
                             0,
                         ],
                     })
                     .notify();
-                // let new_time = timer1.counter().unwrap();
-
-                log::info!("gyro data: {:?}", imu.gyro_raw().unwrap());
+                // log::info!("pad data:{:?}", touch_data);
             }
+            // let new_time = timer1.counter().unwrap();
+
             Ets::delay_us(1);
         }
+        // let pad_data = trackpad.relative_data().unwrap();
+        // log::info!("pad data:{:?}", pad_data);
         conn_updated = 0;
-        last_values = None;
         delay::FreeRtos::delay_ms(1000);
     }
 }
