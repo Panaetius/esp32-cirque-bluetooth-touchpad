@@ -14,7 +14,7 @@ use esp_idf_hal::{
     prelude::*,
     timer::{TimerConfig, TimerDriver},
 };
-use tm040040::{Address, FeedMode, Tm040040, XYInverted};
+use tm040040::{Address, Tm040040, XYInverted};
 
 const TRACKPAD_ID: u8 = 0x01;
 
@@ -96,9 +96,8 @@ fn main() -> Result<()> {
     let scl = peripherals.pins.gpio8;
     let config = I2cConfig::new().baudrate(400.kHz().into());
     let i2c = I2cDriver::new(peripherals.i2c0, sda, scl, &config)?;
-    let mut trackpad = Tm040040::new(i2c, Address::Primary).unwrap();
+    let mut trackpad = Tm040040::new(i2c, Address::Primary).enable().unwrap();
     let device_id = trackpad.device_id().unwrap();
-    trackpad.set_feed_mode(FeedMode::Enabled).unwrap();
     log::info!("Device Id:{:?}", device_id);
     let power_mode = trackpad.power_mode().unwrap();
     log::info!("Powermode: {:?}", power_mode);

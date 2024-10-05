@@ -42,7 +42,10 @@ esp32-nimble = "0.7.0"
 icm42670 = "0.2.0"
 anyhow = "1.0.89"
 shared-bus = "0.3.1"
-tm040040 =  "0.1.0" 
+tm040040 =  "0.2.0" 
+
+# [patch.crates-io]
+# tm040040 = { path = "../tm040040/" }
 
 [build-dependencies]
 embuild = "0.32.0"
