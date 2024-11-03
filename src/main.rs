@@ -9,6 +9,7 @@ use esp32_nimble::{
 };
 use esp_idf_hal::{
     delay::{self, Ets},
+    gpio::PinDriver,
     i2c::{I2cConfig, I2cDriver},
     peripherals::Peripherals,
     prelude::*,
@@ -70,6 +71,12 @@ fn accelerate_move(x_delta: f32, y_delta: f32) -> (f32, f32) {
     (x_delta, y_delta)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PowerMode {
+    Active,
+    Sleep,
+}
+
 #[allow(dead_code)]
 #[repr(packed)]
 struct MouseReport {
@@ -89,22 +96,25 @@ fn main() -> Result<()> {
 
     let config = TimerConfig::new();
     let mut timer1 = TimerDriver::new(peripherals.timer00, &config).unwrap();
-    timer1.set_counter(0u64).unwrap();
-    timer1.enable(true).unwrap();
 
     let sda = peripherals.pins.gpio10;
     let scl = peripherals.pins.gpio8;
+    let mut hardware_ready_pin = PinDriver::input(peripherals.pins.gpio1)?;
     let config = I2cConfig::new().baudrate(400.kHz().into());
     let i2c = I2cDriver::new(peripherals.i2c0, sda, scl, &config)?;
-    let mut trackpad = Tm040040::new(i2c, Address::Primary).enable().unwrap();
+    let mut trackpad = Tm040040::new(i2c, Address::Primary, &mut hardware_ready_pin)
+        .enable()
+        .unwrap();
     let device_id = trackpad.device_id().unwrap();
     log::info!("Device Id:{:?}", device_id);
+    trackpad.set_power_mode(tm040040::PowerMode::Sleep).unwrap();
+    delay::FreeRtos::delay_ms(100);
     let power_mode = trackpad.power_mode().unwrap();
     log::info!("Powermode: {:?}", power_mode);
 
     let position_mode = trackpad.position_mode().unwrap();
     log::info!("Positionmode: {:?}", position_mode);
-    trackpad.set_xy_inverted(XYInverted::XInverted).unwrap();
+    trackpad.set_xy_inverted(XYInverted::YInverted).unwrap();
 
     BLEDevice::set_device_name("Awesome BT Trackpad").unwrap();
 
@@ -113,10 +123,20 @@ fn main() -> Result<()> {
         .security()
         .set_auth(AuthReq::all())
         .set_passkey(123456)
-        .set_io_cap(SecurityIOCap::NoInputNoOutput)
+        .set_io_cap(SecurityIOCap::DisplayOnly)
         .resolve_rpa();
 
     let server = ble_device.get_server();
+    server.on_connect(|_server, desc| {
+        log::info!("Client connected:{:?}", desc);
+    });
+    server.on_disconnect(|desc, reason| {
+        log::info!("Client disconnected:{:?}, {:?}", desc, reason);
+    });
+
+    server.on_authentication_complete(|desc, result| {
+        log::info!("Auth Complete: {:?}: {:?}", result, desc);
+    });
     let mut hid_device = BLEHIDDevice::new(server);
     hid_device.manufacturer("Hogru");
     hid_device.pnp(0x01, 0x0000, 0x0001, 0x0100);
@@ -129,6 +149,7 @@ fn main() -> Result<()> {
     let ble_advertising = ble_device.get_advertising();
     ble_advertising
         .lock()
+        .scan_response(false)
         .set_data(
             BLEAdvertisementData::new()
                 .name("Awesome BT Trackpad")
@@ -136,25 +157,38 @@ fn main() -> Result<()> {
                 .add_service_uuid(hid_device.hid_service().lock().uuid()),
         )
         .unwrap();
+    ble_advertising.lock().on_complete(|_| {
+        ble_advertising.lock().start().unwrap();
+    });
     ble_advertising.lock().start().unwrap();
 
-    server.on_authentication_complete(|desc, result| {
-        log::info!("Auth Complete: {:?}: {:?}", result, desc);
-    });
-
     let mut conn_updated = 0;
+    let mut power_mode = PowerMode::Sleep;
+    let mut waiting_for_sleep = false;
+    let timer_tick_hz = timer1.tick_hz();
     loop {
         log::info!("Checking connections");
+        log::info!("bonded addresses: {:?}", ble_device.bonded_addresses());
         while server.connected_count() > 0 {
-            if conn_updated < 100 {
+            let connection = server.connections().next().unwrap();
+            log::info!("connection:{:?}", connection);
+            if !connection.bonded() {
+                delay::FreeRtos::delay_ms(1000);
+                continue;
+            }
+            if conn_updated < 10 {
                 let conn_handle = server.connections().next().unwrap().conn_handle();
-                server.update_conn_params(conn_handle, 6, 6, 0, 50).unwrap();
+                server
+                    .update_conn_params(conn_handle, 6, 6, 15, 50)
+                    .unwrap();
                 Ets::delay_ms(1);
                 log::info!("connection params updated");
                 conn_updated += 1;
             }
             let pad_data = trackpad.relative_data().unwrap();
             if let Some(touch_data) = pad_data {
+                power_mode = PowerMode::Active;
+                waiting_for_sleep = false;
                 let buttons = (touch_data.primary_pressed as u8)
                     | ((touch_data.secondary_pressed as u8) << 1);
                 let delta = accelerate_move(touch_data.x_delta as f32, touch_data.y_delta as f32);
@@ -181,10 +215,25 @@ fn main() -> Result<()> {
                         delta.1.max(i8::MIN as f32).min(i8::MAX as f32) as i8
                     )
                 );
+            } else if power_mode == PowerMode::Active && !waiting_for_sleep {
+                // No touch. we want to throttle after 5s to consume less power
+                timer1.set_counter(0_u64).unwrap();
+                timer1.enable(true).unwrap();
+                waiting_for_sleep = true;
+            } else if power_mode == PowerMode::Active
+                && timer1.counter().unwrap() / timer_tick_hz > 4
+            {
+                // no touch for 5 seconds, enter sleep mode
+                power_mode = PowerMode::Sleep;
+                timer1.enable(false).unwrap();
+                log::info!("entered sleep mode");
             }
-            // let new_time = timer1.counter().unwrap();
 
-            Ets::delay_us(1);
+            if power_mode == PowerMode::Active {
+                Ets::delay_us(1);
+            } else {
+                delay::FreeRtos::delay_ms(100); // only check every 100ms if we are in sleep mode, hopefully saving power
+            }
         }
         // let pad_data = trackpad.relative_data().unwrap();
         // log::info!("pad data:{:?}", pad_data);
